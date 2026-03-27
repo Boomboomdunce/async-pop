@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use nom::error::{Error as NomError, ErrorKind};
 use nom::{
     branch::alt,
     bytes::streaming::{tag, take_until, take_while, take_while_m_n},
@@ -68,9 +69,18 @@ fn list_stats(input: &[u8]) -> IResult<&[u8], Stat> {
 }
 
 pub(crate) fn list_response(input: &[u8]) -> IResult<&[u8], Response> {
-    let (input, stats) = alt((map(list_stats, Some), map(message_parser, |_| None)))(input)?;
+    let (input, (stats, first_item)) = alt((
+        map(list_stats, |stats| (Some(stats), None)),
+        map(stat, |item| (None, Some(item))),
+        map(message_parser, |_| (None, None)),
+    ))(input)?;
 
-    let (input, (items, _end)) = many_till(preceded(opt(tag(".")), stat), end_of_multiline)(input)?;
+    let (input, (mut items, _end)) =
+        many_till(preceded(opt(tag(".")), stat), end_of_multiline)(input)?;
+
+    if let Some(first_item) = first_item {
+        items.insert(0, first_item);
+    }
 
     let list = List::new(stats, items);
 
@@ -99,9 +109,17 @@ fn uidl(input: &[u8]) -> IResult<&[u8], UniqueId> {
 }
 
 pub(crate) fn uidl_list_response(input: &[u8]) -> IResult<&[u8], Response> {
-    let (input, message) = message_parser(input)?;
+    let (input, (message, first_item)) = alt((
+        map(uidl, |item| (None, Some(item))),
+        map(message_parser, |message| (message, None)),
+    ))(input)?;
 
-    let (input, (list, _end)) = many_till(preceded(opt(tag(".")), uidl), end_of_multiline)(input)?;
+    let (input, (mut list, _end)) =
+        many_till(preceded(opt(tag(".")), uidl), end_of_multiline)(input)?;
+
+    if let Some(first_item) = first_item {
+        list.insert(0, first_item);
+    }
 
     let list = Uidl::new(message, list);
 
@@ -111,7 +129,25 @@ pub(crate) fn uidl_list_response(input: &[u8]) -> IResult<&[u8], Response> {
 pub(crate) fn uidl_response(input: &[u8]) -> IResult<&[u8], Response> {
     let (input, unique_id) = uidl(input)?;
 
+    if looks_like_multiline_continuation(input) {
+        return Err(nom::Err::Error(NomError::new(input, ErrorKind::Verify)));
+    }
+
     Ok((input, Response::Uidl(unique_id.into())))
+}
+
+pub(crate) fn list_single_response(input: &[u8]) -> IResult<&[u8], Response> {
+    let (input, stats) = stat(input)?;
+
+    if looks_like_multiline_continuation(input) {
+        return Err(nom::Err::Error(NomError::new(input, ErrorKind::Verify)));
+    }
+
+    Ok((input, Response::Stat(stats)))
+}
+
+fn looks_like_multiline_continuation(input: &[u8]) -> bool {
+    matches!(input.first(), Some(b'0'..=b'9') | Some(b'.'))
 }
 
 pub(crate) fn rfc822_response(input: &[u8]) -> IResult<&[u8], Response> {
