@@ -217,6 +217,20 @@ mod test {
     }
 
     #[test]
+    fn test_list_rejects_zero_message_number() {
+        let data = b"+OK 1 messages (120 bytes)\r\n0 120\r\n.\r\n";
+
+        assert!(parse(data, &Command::List).is_err());
+    }
+
+    #[test]
+    fn test_uidl_rejects_zero_message_number() {
+        let data = b"+OK unique-id listing follows\r\n0 baduid\r\n.\r\n";
+
+        assert!(parse(data, &Command::Uidl).is_err());
+    }
+
+    #[test]
     fn test_string() {
         let data = b"+OK maildrop has 2 messages (320 octets)\r\n";
 
