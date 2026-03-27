@@ -160,6 +160,13 @@ impl<S: Read + Write + Unpin> Stream for PopStream<S> {
                 buf.filled().len() - start
             };
 
+            if bytes_read == 0 {
+                return Poll::Ready(Some(Err(crate::error::Error::new(
+                    ErrorKind::ConnectionClosed,
+                    "The connection was closed by the server",
+                ))));
+            }
+
             this.buffer.move_cursor(bytes_read);
 
             if let Some(response) = this.decode()? {
@@ -214,7 +221,9 @@ struct Buffer {
 
 impl Buffer {
     const CHUNK_SIZE: usize = 2048;
-    const MAX_SIZE: usize = Self::CHUNK_SIZE * 1024 * 10;
+    // Real-world RFC822 messages can easily exceed 20 MiB once attachments are included.
+    // Keep a hard cap to avoid unbounded growth, but raise it enough for normal archiving.
+    const MAX_SIZE: usize = 128 * 1024 * 1024;
 
     fn new() -> Self {
         Self {
@@ -285,5 +294,81 @@ impl Buffer {
 
     fn cursor(&self) -> usize {
         self.cursor
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "runtime-tokio")]
+    use std::io;
+
+    #[cfg(feature = "runtime-tokio")]
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    #[cfg(feature = "runtime-tokio")]
+    #[derive(Default)]
+    struct EofThenPanicStream {
+        reads: usize,
+    }
+
+    #[cfg(feature = "runtime-tokio")]
+    impl AsyncRead for EofThenPanicStream {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.reads += 1;
+            if self.reads > 1 {
+                panic!("poll_read called again after EOF");
+            }
+
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[cfg(feature = "runtime-tokio")]
+    impl AsyncWrite for EofThenPanicStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[cfg(feature = "runtime-tokio")]
+    #[test]
+    fn poll_next_returns_connection_closed_on_eof() {
+        let mut stream = PopStream::new(EofThenPanicStream::default());
+        stream.queue.add(crate::command::Command::List);
+
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut stream).poll_next(&mut cx);
+        match poll {
+            Poll::Ready(Some(Err(err))) => {
+                assert!(matches!(err.kind(), ErrorKind::ConnectionClosed));
+            }
+            other => panic!("expected connection-closed error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn buffer_accepts_messages_larger_than_twenty_megabytes() {
+        let mut buffer = Buffer::new();
+        assert!(buffer.ensure_capacity(25 * 1024 * 1024).is_ok());
     }
 }
