@@ -9,11 +9,10 @@ use std::{
 };
 
 use crate::{
-    command::Command,
     error::{err, ErrorKind},
     macros::escape_newlines,
     request::Request,
-    response::Response,
+    response::{Response, ResponseShape},
     runtime::{
         io::{Read, Write, WriteExt},
         Instant,
@@ -65,11 +64,11 @@ impl<S: Read + Write + Unpin> PopStream<S> {
 
         let used = self.buffer.take();
 
-        let current_command = self.queue.current();
+        let current_shape = self.queue.current();
 
-        match current_command {
-            Some(command) => {
-                match Response::from_bytes(&used[..self.buffer.cursor()], command) {
+        match current_shape {
+            Some(shape) => {
+                match Response::from_shape(&used[..self.buffer.cursor()], shape) {
                     Ok((remaining, response)) => {
                         trace!(
                             "S: {}",
@@ -112,8 +111,9 @@ impl<S: Read + Write + Unpin> PopStream<S> {
         Ok(None)
     }
 
-    pub async fn read_response<C: Into<Command>>(&mut self, command: C) -> Result<Response> {
-        self.queue.add(command);
+    pub async fn read_response<R: Into<Request>>(&mut self, request: R) -> Result<Response> {
+        let request = request.into();
+        self.queue.add(ResponseShape::from(&request));
 
         if let Some(resp_result) = self.next().await {
             return match resp_result {
@@ -193,7 +193,7 @@ impl<S: Read + Write + Unpin> PopStream<S> {
 }
 
 struct CommandQueue {
-    list: Vec<Command>,
+    list: Vec<ResponseShape>,
 }
 
 impl CommandQueue {
@@ -201,11 +201,11 @@ impl CommandQueue {
         Self { list: Vec::new() }
     }
 
-    fn add<C: Into<Command>>(&mut self, command: C) {
-        self.list.push(command.into())
+    fn add(&mut self, shape: ResponseShape) {
+        self.list.push(shape)
     }
 
-    fn current(&self) -> Option<&Command> {
+    fn current(&self) -> Option<&ResponseShape> {
         self.list.first()
     }
 
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn poll_next_returns_connection_closed_on_eof() {
         let mut stream = PopStream::new(EofThenPanicStream::default());
-        stream.queue.add(crate::command::Command::List);
+        stream.queue.add(crate::response::ResponseShape::ListMulti);
 
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);

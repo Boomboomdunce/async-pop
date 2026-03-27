@@ -16,7 +16,7 @@ use self::{
     rfc2449::capability_response,
 };
 
-use super::Response;
+use super::{Response, ResponseShape};
 
 pub(crate) fn parse<'a>(input: &'a [u8], request: &Command) -> IResult<&'a [u8], Response> {
     if input.is_empty() {
@@ -47,6 +47,47 @@ pub(crate) fn parse<'a>(input: &'a [u8], request: &Command) -> IResult<&'a [u8],
             Command::Retr | Command::Top => rfc822_response(input),
             Command::Capa => capability_response(input),
             _ => string_response(input),
+        }
+    } else {
+        error_response(input)
+    }
+}
+
+pub(crate) fn parse_shape<'a>(
+    input: &'a [u8],
+    shape: &ResponseShape,
+) -> IResult<&'a [u8], Response> {
+    if input.is_empty() {
+        return Err(nom::Err::Incomplete(nom::Needed::Unknown));
+    }
+
+    #[cfg(feature = "sasl")]
+    if matches!(shape, ResponseShape::Auth) {
+        match rfc1734::auth(input) {
+            Ok((input, base64_challenge)) => {
+                if let Ok(challenge) = crate::base64::decode(base64_challenge) {
+                    return Ok((input, Response::Challenge(challenge.into())));
+                }
+            }
+            Err(nom::Err::Incomplete(needed)) => return Err(nom::Err::Incomplete(needed)),
+            Err(_) => {}
+        }
+    }
+
+    let (input, status) = status(input)?;
+
+    if status.success() {
+        match shape {
+            ResponseShape::Message | ResponseShape::Greeting => string_response(input),
+            ResponseShape::Stat => stat_response(input),
+            ResponseShape::ListSingle => list_single_response(input),
+            ResponseShape::ListMulti => list_response(input),
+            ResponseShape::UidlSingle => uidl_response(input),
+            ResponseShape::UidlMulti => uidl_list_response(input),
+            ResponseShape::Bytes => rfc822_response(input),
+            ResponseShape::Capability => capability_response(input),
+            #[cfg(feature = "sasl")]
+            ResponseShape::Auth => string_response(input),
         }
     } else {
         error_response(input)
